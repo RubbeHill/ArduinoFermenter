@@ -2,12 +2,8 @@
 
 TempSchedule::TempSchedule(byte temperature, unsigned long days)
 : _temperature(temperature),
-  _duration(days * 86400000), // Convert days to milliseconds
+  _duration(days * 10000),//86400000), // Convert days to milliseconds
   _startTime(millis()) {
-}
-
-unsigned long TempSchedule::getStart() {
-    return _startTime;
 }
 
 bool TempSchedule::isDone() {
@@ -18,31 +14,59 @@ void TempSchedule::setStartTime(unsigned long startTime) {
     _startTime = startTime;
 }
 
+byte TempSchedule::getTemp() {
+    return _temperature;
+}
+
+void TempSchedule::setTemp(byte temperature) {
+    _temperature = temperature;
+}
+
+unsigned long TempSchedule::getDuration() {
+    return _duration;
+}
+
+void TempSchedule::setDuration(unsigned long days) {
+    _duration = days * 10000; //86400000;
+}
+
 Schedules::Schedules() 
-: _currentSchedule(0),
-  _schedulesCount(0) {
+: _schedulesCount(0) {
 }
 
 bool Schedules::next() {
-    if(_schedulesCount > 0) {
-        if (_schedules[_currentSchedule]->isDone()) {
-            _currentSchedule = (_currentSchedule + 1) % 3;
-            _schedules[_currentSchedule]->setStartTime(millis());
-            return true;
+    if (_schedulesCount > 0 && _schedules[0]->isDone()) {
+        Serial.println("Started next schedule!");
+        delete _schedules[0];
+        for (int i = 0; i < _schedulesCount; i++) {
+            _schedules[i] = _schedules[i+1];
         }
+        _schedulesCount--;
+        _schedules[0]->setStartTime(millis());
+        return true;
     }
     return false;
 }
 
-bool Schedules::addTempSchedule(byte temperature, unsigned long days) {
+void Schedules::addTempSchedule(byte temperature, unsigned long days) {
     if (_schedulesCount < SCHEDULES_MAX_COUNT) {
         TempSchedule* newSchedule = new TempSchedule(temperature, days);
+        _schedules[_schedulesCount] = newSchedule; 
         _schedulesCount++;
-        _schedules[(_currentSchedule + _schedulesCount - 1) % 3] = newSchedule; // Add into next free space in the array (using overflow)
-        Serial.println("Added ts");
-        return true;
     }
-    Serial.println("Failed ts");
-    return false;
+}
+
+byte Schedules::getSchedulesCount() {
+    return _schedulesCount;
+}
+
+TempSchedule* Schedules::getTempSchedule(byte index) {
+    if (index < SCHEDULES_MAX_COUNT) {
+        return _schedules[index];
+    } else if (index < 0) {
+        return _schedules[0];
+    } else {
+        return _schedules[SCHEDULES_MAX_COUNT-1];
+    }
 }
 
