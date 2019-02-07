@@ -55,6 +55,7 @@ public:
         _display->draw1x2String(0, _currentRow*2, menu_item.get_name());
     }
 
+    // Highlights name if !has_focus, and value if has_focus.
     void render_numeric_menu_item(NumericMenuItem const& menu_item) const {
         D(menu_item.get_name())
         D(" ")
@@ -63,8 +64,11 @@ public:
         if (menu_item.has_focus())
             _display->setInverseFont(false);
         _display->draw1x2String(0, _currentRow*2, menu_item.get_name());
-        if (menu_item.has_focus())
+        if (menu_item.has_focus()) {
             _display->setInverseFont(true);
+        } else {
+            _display->setInverseFont(false);
+        }
         _display->draw1x2String(13, _currentRow*2, menu_item.get_formatted_value().c_str());
         _display->setInverseFont(false);
     }

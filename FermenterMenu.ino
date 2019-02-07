@@ -2,29 +2,19 @@
 #include <EasyButton.h>
 #include <MenuSystem.h>
 #include <OneWire.h>
+#include <PID_v1.h>
 #include <RotaryEncoder.h>
 #include <U8x8lib.h>
 
 #include "TempSchedule.h"
 #include "MenuRenderer.cpp"
 
-
-#define DEBUG
-
-#ifdef DEBUG
-    #define D(x) Serial.print(x);
-    #define D2(x) Serial.println(x);
-#else
-    #define D(x)
-    #define D2(x)
-#endif
-
-
 #define ENC_BTN_PIN 2
 #define ENC_DT_PIN 3
 #define ENC_CLK_PIN 4
 #define ONE_WIRE_BUS 10
-#define COOLER_RELAY_PIN 13
+#define COOLER_RELAY_PIN 12
+#define HEATER_RELAY_PIN 11
 
 // *************************
 // Forward declarations
@@ -45,7 +35,6 @@ RotaryEncoder encoder(ENC_DT_PIN, ENC_CLK_PIN);
 OneWire oneWire(ONE_WIRE_BUS);
 DallasTemperature sensors(&oneWire);
 
-
 Schedules schedules;
 
 // *************************
@@ -56,16 +45,17 @@ U8X8_SSD1306_128X64_NONAME_HW_I2C oled(/* reset=*/ U8X8_PIN_NONE);
 MenuRenderer renderer(&oled);
 MenuSystem ms(renderer);
 
-Menu newTSButton("[Nytt schema]", &onNewTSPressed);
-NumericMenuItem newTSTempValue("Temperatur", nullptr, 10, -5, 30, 1.0, &formatNumericMenuItemValue);
-NumericMenuItem newTSDaysValue("Dagar", nullptr, 1, 1, 30, 1.0, &formatNumericMenuItemValue);
-BackMenuItem newTSConfirmButton("[Lagg till]", &onNewTSConfirmed, &ms);
+Menu newTSButton("[New target]", &onNewTSPressed);
+NumericMenuItem newTSIndex("Target #", nullptr, 1, 1, 3, 1.0, &formatNumericMenuItemValue); // 1-indexed for user-readability
+NumericMenuItem newTSTempValue("Temperature", nullptr, 10, -5, 30, 1.0, &formatNumericMenuItemValue);
+NumericMenuItem newTSDaysValue("Days", nullptr, 1, 1, 30, 1.0, &formatNumericMenuItemValue);
+BackMenuItem newTSConfirmButton("[Add]", &onNewTSConfirmed, &ms);
 
-Menu editTSButton("[Andra schema]", &onEditTSPressed);
-NumericMenuItem editTSIndex("Schema nr", &onEditTSIndexChanged, 1, 1, 3, 1.0, &formatNumericMenuItemValue); // 1-indexed for user-readability
-NumericMenuItem editTSTempValue("Temperatur", nullptr, 10, -5, 30, 1.0, &formatNumericMenuItemValue);
-NumericMenuItem editTSDaysValue("Dagar", nullptr, 1, 1, 30, 1.0, &formatNumericMenuItemValue);
-BackMenuItem editTSConfirmButton("[Andra]", &onEditTSConfirmed, &ms);
+Menu editTSButton("[Edit targets]", &onEditTSPressed);
+NumericMenuItem editTSIndex("Target #", &onEditTSIndexChanged, 1, 1, 3, 1.0, &formatNumericMenuItemValue); // 1-indexed for user-readability
+NumericMenuItem editTSTempValue("Temperature", nullptr, 10, -5, 30, 1.0, &formatNumericMenuItemValue);
+NumericMenuItem editTSDaysValue("Days", nullptr, 1, 1, 30, 1.0, &formatNumericMenuItemValue);
+BackMenuItem editTSConfirmButton("[Edit]", &onEditTSConfirmed, &ms);
 
 // *************************
 // Callback functions
@@ -78,7 +68,11 @@ const String formatNumericMenuItemValue(const float value) {
 
 // Resets/blocks menu for creating a new TimeSchedule.
 void onNewTSPressed(Menu* menu) {
-    if (schedules.getSchedulesCount() < Schedules::SCHEDULES_MAX_COUNT) {
+    byte count = schedules.getSchedulesCount();
+    if (count < Schedules::SCHEDULES_MAX_COUNT) {
+        newTSIndex.set_value(count + 1);        // 1-index for readability
+        newTSIndex.set_min_value(count + 1);    // 1-index for readability
+        newTSIndex.set_max_value(count + 1);    // 1-index for readability
         newTSTempValue.set_value(10);
         newTSDaysValue.set_value(1);
     } else {
@@ -128,29 +122,128 @@ void onEditTSConfirmed(MenuComponent* menuComponent) {
 void onEncBtnPressed() {
     ms.select();
     ms.display();
+    displayTempAndTarget();
 }
 
 void onEncBtnHold() {
     ms.back();
     ms.display();
+    displayTempAndTarget();
 }
 
 // *************************
 // Other variables
 // *************************
 
+const unsigned long WINDOW_SIZE = 5000; // 5 sec
+const unsigned long COMPRESSOR_SAFETY_DURATION = 300000; // // 5 min
+const double KP = 2, KI = 5, KD = 1;
+
+double targetTemp, inputTemp, output;
+
+PID pid(&inputTemp, &output, &targetTemp, KP, KI, KD, P_ON_M, DIRECT);
+
 int encPos = 0;
-unsigned long lastIntervalStart = 0;
-const unsigned long INTERVAL_DURATION = 5000;
-float lastTemp = 0;
+unsigned long lastWindowStart = -WINDOW_SIZE;
+unsigned long lastCompressorStop = -COMPRESSOR_SAFETY_DURATION;
 
 
 // *************************
 // Arduino functions
 // *************************
 
+bool updateWindow() {
+    if (millis() - lastWindowStart > WINDOW_SIZE) {
+        lastWindowStart += WINDOW_SIZE;
+        return true;
+    }
+    return false;
+}
+
+void readTemp() {   
+    sensors.requestTemperatures();
+    inputTemp = sensors.getTempCByIndex(0);
+    displayTempAndTarget();
+}
+
+void readEnc() {
+    encoder.tick();
+    int newPos = encoder.getPosition();
+
+    if (newPos != encPos) {
+        if (newPos > encPos) {
+            ms.next(true);
+        } else if (newPos < encPos) {
+            ms.prev(true);
+        }
+        ms.display();
+        displayTempAndTarget();
+        encPos = newPos;
+    }
+
+    encoderButton.read();
+}
+
+void writeRelays() {
+    if (schedules.getSchedulesCount() == 0) 
+        return;
+    
+    pid.Compute();
+   
+    // Start/stop cooler
+    if (inputTemp > targetTemp + 1 && millis() - lastCompressorStop > COMPRESSOR_SAFETY_DURATION) {
+        digitalWrite(COOLER_RELAY_PIN, HIGH);
+    } else if (inputTemp < targetTemp - 0.5) {
+        if (digitalRead(COOLER_RELAY_PIN))
+            lastCompressorStop = millis();
+        digitalWrite(COOLER_RELAY_PIN, LOW);
+    }
+
+    // Start/stop heater
+    if (inputTemp < targetTemp -1) {
+        pid.SetMode(AUTOMATIC);
+        
+        if (output < millis() - lastWindowStart) {
+            digitalWrite(HEATER_RELAY_PIN, HIGH);
+        } else {
+            digitalWrite(HEATER_RELAY_PIN, LOW);
+        }
+    } else if (inputTemp > targetTemp + 0.5) { // Maybe to tight to disable pid on 0.5 degree overshoot?
+        pid.SetMode(MANUAL);
+        digitalWrite(HEATER_RELAY_PIN, LOW);
+    }
+}
+
+void displayTempAndTarget() {
+    if (&(ms.get_root_menu()) == ms.get_current_menu()) { 
+        char temp[6];
+        char target[3];
+        char s[16];
+        dtostrf(inputTemp, 5, 1, temp);
+        dtostrf(targetTemp, 2, 0, target);
+
+        if (schedules.getTempSchedule(0)) {
+            sprintf(s, "%s -> %s", temp, target);
+        } else {
+            sprintf(s, "%s -> ??", temp);
+        }     
+        
+        oled.drawString(0, 4, "----------------");
+        oled.drawString(0, 5, "Temp   Target");
+        oled.draw1x2String(0, 6, s);
+        if (digitalRead(COOLER_RELAY_PIN))
+            oled.drawString(14, 6, "*");
+        if (digitalRead(HEATER_RELAY_PIN))
+            oled.drawString(14, 7, "~");
+    }
+}
+
 void setup() {
     Serial.begin(57600);
+
+    // Setup relays
+    pinMode(COOLER_RELAY_PIN, OUTPUT);
+    pinMode(HEATER_RELAY_PIN, OUTPUT);
 
     // Setup rotary encoder
     encoderButton.begin();
@@ -159,6 +252,11 @@ void setup() {
 
     // Setup thermometer
     sensors.begin();
+    readTemp();
+
+    // Setup pid for heater
+    pid.SetOutputLimits(0, WINDOW_SIZE);
+    pid.SetMode(MANUAL); // Disable pid from start
 
     // Setup oled display
     oled.begin();
@@ -167,6 +265,7 @@ void setup() {
 
     // Setup menu for new TimeSchedule.
     ms.get_root_menu().add_menu(&newTSButton);
+    newTSButton.add_item(&newTSIndex);
     newTSButton.add_item(&newTSTempValue);
     newTSButton.add_item(&newTSDaysValue);
     newTSButton.add_item(&newTSConfirmButton);
@@ -179,48 +278,29 @@ void setup() {
     editTSButton.add_item(&editTSConfirmButton);
 
     ms.display();
+    displayTempAndTarget();
 }
 
-uint32_t last = 0;
-
 void loop() {
-    if (schedules.next()) {
-        ms.back();
-        ms.display();
-    }
-
-    // TODO: Only do this if a schedule is present.
-    if (millis() - lastIntervalStart > INTERVAL_DURATION) {
-        lastIntervalStart = millis();
-        // Kolla temp och starta relä
-        sensors.requestTemperatures();
-        Serial.print("Temperature for the device 1 (index 0) is: ");
-        Serial.println(sensors.getTempCByIndex(0));
-        lastTemp = sensors.getTempCByIndex(0);
-
-        if (&(ms.get_root_menu()) == ms.get_current_menu()) { 
-            char temp[5];
-            char s[16];
-            dtostrf(lastTemp, 5, 1, temp);
-            sprintf(s, "%s -> %i", temp, schedules.getTempSchedule(0)->getTemp());
-            oled.draw1x2String(1, 5, s);
-        }
+    if (updateWindow()) {
+        readTemp();
     }
     
-    encoder.tick();
-    int newPos = encoder.getPosition();
-
-    if (newPos != encPos) {
-        if (newPos > encPos) {
-            ms.next(true);
-        } else if (newPos < encPos) {
-            ms.prev(true);
-        }
+    // Reset stuff when the next schedule begins.
+    if (schedules.next()) {
+        targetTemp = schedules.getTempSchedule(0)->getTemp();
+        digitalWrite(COOLER_RELAY_PIN, LOW);
+        digitalWrite(HEATER_RELAY_PIN, LOW); // TODO: Make sure lastCompressorStop is correct
+        pid.SetMode(MANUAL);
+        ms.back();
         ms.display();
-        encPos = newPos;
+        displayTempAndTarget(); 
+    } else if (schedules.getSchedulesCount() == 0) {
+        digitalWrite(COOLER_RELAY_PIN, LOW);
+        digitalWrite(HEATER_RELAY_PIN, LOW); // TODO: Make sure lastCompressorStop is correct
+        pid.SetMode(MANUAL);
     }
 
-    encoderButton.read();
-    Serial.println(millis() - last);
-    last = millis();
+    writeRelays();
+    readEnc();
 }

@@ -1,6 +1,6 @@
 #include "TempSchedule.h"
 
-TempSchedule::TempSchedule(byte temperature, unsigned long days)
+TempSchedule::TempSchedule(int temperature, unsigned long days)
 : _temperature(temperature),
   _duration(days * 10000),//86400000), // Convert days to milliseconds
   _startTime(millis()) {
@@ -14,11 +14,11 @@ void TempSchedule::setStartTime(unsigned long startTime) {
     _startTime = startTime;
 }
 
-byte TempSchedule::getTemp() {
+int TempSchedule::getTemp() {
     return _temperature;
 }
 
-void TempSchedule::setTemp(byte temperature) {
+void TempSchedule::setTemp(int temperature) {
     _temperature = temperature;
 }
 
@@ -35,20 +35,25 @@ Schedules::Schedules()
 }
 
 bool Schedules::next() {
-    if (_schedulesCount > 0 && _schedules[0]->isDone()) {
-        Serial.println("Started next schedule!");
-        delete _schedules[0];
-        for (int i = 0; i < _schedulesCount; i++) {
-            _schedules[i] = _schedules[i+1];
+    if (_schedulesCount > 0) {
+        if (_currentSchedule == NULL) {
+            _currentSchedule = _schedules[0];
+            _currentSchedule->setStartTime(millis());
+            return true;
+        } else if (_currentSchedule->isDone()) {
+            delete _currentSchedule;
+            for (int i = 0; i < _schedulesCount; i++) {
+                _schedules[i] = _schedules[i+1];
+            }
+            _schedulesCount--;
+            _currentSchedule = NULL;
+            return this->next();
         }
-        _schedulesCount--;
-        _schedules[0]->setStartTime(millis());
-        return true;
     }
     return false;
 }
 
-void Schedules::addTempSchedule(byte temperature, unsigned long days) {
+void Schedules::addTempSchedule(int temperature, unsigned long days) {
     if (_schedulesCount < SCHEDULES_MAX_COUNT) {
         TempSchedule* newSchedule = new TempSchedule(temperature, days);
         _schedules[_schedulesCount] = newSchedule; 
@@ -63,10 +68,8 @@ byte Schedules::getSchedulesCount() {
 TempSchedule* Schedules::getTempSchedule(byte index) {
     if (index < SCHEDULES_MAX_COUNT) {
         return _schedules[index];
-    } else if (index < 0) {
-        return _schedules[0];
     } else {
-        return _schedules[SCHEDULES_MAX_COUNT-1];
+        return NULL;
     }
 }
 
